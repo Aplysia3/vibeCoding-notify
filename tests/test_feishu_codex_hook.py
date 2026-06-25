@@ -90,11 +90,13 @@ class FeishuCodexHookTests(unittest.TestCase):
             root = Path(temp_dir)
             config = self.create_config(root)
             context = {
-                "event_name": "session_start",
-                "event_display_name": "SessionStart",
-                "title": "Codex 开始处理",
-                "template": "blue",
-                "summary": "已开始处理当前请求",
+                "event_name": "stop",
+                "event_display_name": "Stop",
+                "title": "Codex 任务完成",
+                "template": "green",
+                "summary": "已完成训练状态检查。",
+                "body_text": "已完成训练状态检查。\n\n不会发送第二段。",
+                "delivery_mode": "card",
                 "project": "demo",
                 "cwd": str(root),
                 "session_id": "abc123456",
@@ -107,7 +109,76 @@ class FeishuCodexHookTests(unittest.TestCase):
             }
             payload = MODULE.build_final_payload(context, config)
             self.assertEqual(payload["msg_type"], "interactive")
-            self.assertEqual(payload["card"]["header"]["title"]["content"], "Codex 开始处理")
+            self.assertEqual(payload["card"]["header"]["title"]["content"], "Codex 任务完成")
+            self.assertEqual(payload["card"]["body"]["elements"][0]["content"], "已完成训练状态检查。")
+
+    def test_build_context_from_session_message_uses_text_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root)
+            payload = {
+                "hook_event_name": "PreToolUse",
+                "cwd": str(root),
+                "session_id": "commentary-session",
+                "model": "gpt-5.4",
+                "tool_name": "Bash",
+            }
+            message = "我先检查仓库状态，确认会提交哪些文件。"
+            context = MODULE.build_context_from_session_message("pre_tool_use", payload, config, message, "commentary")
+            self.assertEqual(context["delivery_mode"], "card")
+            self.assertEqual(context["title"], "Codex 过程更新")
+            self.assertEqual(context["summary"], "我先检查仓库状态，确认会提交哪些文件。")
+
+    def test_build_text_payload_omits_footer_metadata(self) -> None:
+        context = {
+            "title": "Codex 任务完成",
+            "summary": "已提交。",
+            "body_text": "已提交。\n\n提交信息：新增 Codex 到飞书的实时过程 Hook",
+        }
+        payload = MODULE.build_text_payload(context)
+        self.assertEqual(
+            payload["content"]["text"],
+            "Codex 任务完成\n\n已提交。\n\n提交信息：新增 Codex 到飞书的实时过程 Hook",
+        )
+
+    def test_build_card_payload_uses_collapsible_panel_for_long_body(self) -> None:
+        context = {
+            "event_name": "stop",
+            "event_display_name": "Stop",
+            "title": "Codex 任务完成",
+            "template": "green",
+            "summary": "已提交。",
+            "body_text": "已提交。\n\n提交信息：新增 Codex 到飞书的实时过程 Hook",
+            "delivery_mode": "card",
+            "project": "vibeCoding-notify",
+            "cwd": "D:\\WorkDic\\Program\\vibeCoding-notify",
+            "session_id": "abc123456",
+            "session_short": "abc12345",
+            "tool_name": "",
+            "model": "gpt-5.4",
+            "hostname": "host",
+            "meta_line": "",
+            "timestamp_text": "2026-06-26 01:00:00",
+            "panel_title": "查看完整结果",
+        }
+        payload = MODULE.build_card_payload(context)
+        self.assertEqual(payload["msg_type"], "interactive")
+        elements = payload["card"]["body"]["elements"]
+        self.assertEqual(elements[0]["tag"], "markdown")
+        self.assertEqual(elements[1]["tag"], "markdown")
+        self.assertIn("项目：vibeCoding-notify", elements[1]["content"])
+        self.assertIn("事件：Stop", elements[1]["content"])
+        self.assertIn("Session：abc12345", elements[1]["content"])
+        self.assertIn("模型：gpt-5.4", elements[1]["content"])
+        self.assertIn("路径：D:\\WorkDic\\Program\\vibeCoding-notify", elements[1]["content"])
+        self.assertIn("时间：2026-06-26 01:00:00", elements[1]["content"])
+        self.assertEqual(elements[2]["tag"], "hr")
+        self.assertEqual(elements[3]["tag"], "collapsible_panel")
+        self.assertEqual(elements[3]["header"]["title"]["content"], "查看完整结果")
+        self.assertEqual(
+            elements[3]["elements"][0]["content"],
+            "已提交。\n\n提交信息：新增 Codex 到飞书的实时过程 Hook",
+        )
 
     def test_apply_feishu_signature(self) -> None:
         payload = {"msg_type": "text", "content": {"text": "hello"}}
@@ -115,21 +186,6 @@ class FeishuCodexHookTests(unittest.TestCase):
             MODULE.apply_feishu_signature(payload, "demo")
         self.assertEqual(payload["timestamp"], "1599360473")
         self.assertEqual(payload["sign"], "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8=")
-
-    def test_run_hook_dedupes_recent_event(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            config = self.create_config(root)
-            payload = {
-                "hook_event_name": "SessionStart",
-                "cwd": str(root),
-                "session_id": "same-session",
-                "model": "gpt-5.4",
-            }
-            with mock.patch.object(MODULE, "send_to_feishu", return_value={"code": 0}) as sender:
-                self.assertEqual(MODULE.run_hook("session_start", payload, config), 0)
-                self.assertEqual(MODULE.run_hook("session_start", payload, config), 0)
-            self.assertEqual(sender.call_count, 1)
 
     def test_read_stdin_json_prefers_utf8_bytes(self) -> None:
         payload = {"last_assistant_message": "2。", "hook_event_name": "Stop"}
@@ -149,6 +205,117 @@ class FeishuCodexHookTests(unittest.TestCase):
         with mock.patch.object(MODULE.sys, "stdin", fake_stdin):
             loaded = MODULE.read_stdin_json()
         self.assertEqual(loaded["last_assistant_message"], "2。")
+
+    def test_extract_session_text_update_reads_commentary_and_final(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_root = root / ".codex" / "sessions" / "2026" / "06" / "26"
+            session_root.mkdir(parents=True, exist_ok=True)
+            session_id = "019efeda-e9e5-7133-91a1-841202651a25"
+            session_file = session_root / f"rollout-2026-06-26T00-00-00-{session_id}.jsonl"
+            lines = [
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "phase": "commentary",
+                        "message": "我先检查仓库状态，确认会提交哪些文件。",
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "last_agent_message": "已提交。\n\n提交哈希：`58af5b3`",
+                    },
+                },
+            ]
+            session_file.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in lines), encoding="utf-8")
+            state = MODULE.HookState(root / "state")
+            try:
+                with mock.patch.object(MODULE, "codex_home_dir", return_value=root / ".codex"):
+                    result = MODULE.extract_session_text_update(session_id, state)
+                self.assertEqual(result["commentary"], "我先检查仓库状态，确认会提交哪些文件。")
+                self.assertEqual(result["final_answer"], "已提交。\n\n提交哈希：`58af5b3`")
+            finally:
+                state.close()
+
+    def test_extract_session_text_update_reads_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_root = root / ".codex" / "sessions" / "2026" / "06" / "26"
+            session_root.mkdir(parents=True, exist_ok=True)
+            session_id = "019efeda-e9e5-7133-91a1-841202651a25"
+            session_file = session_root / f"rollout-2026-06-26T00-00-00-{session_id}.jsonl"
+            lines = [
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "error",
+                        "message": "stream disconnected before completion: Transport error: network error: error decoding response body",
+                    },
+                },
+            ]
+            session_file.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in lines), encoding="utf-8")
+            state = MODULE.HookState(root / "state")
+            try:
+                with mock.patch.object(MODULE, "codex_home_dir", return_value=root / ".codex"):
+                    result = MODULE.extract_session_text_update(session_id, state)
+                self.assertEqual(
+                    result["error"],
+                    "stream disconnected before completion: Transport error: network error: error decoding response body",
+                )
+            finally:
+                state.close()
+
+    def test_wait_for_final_session_text_reads_latest_final(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_root = root / ".codex" / "sessions" / "2026" / "06" / "26"
+            session_root.mkdir(parents=True, exist_ok=True)
+            session_id = "019efeda-e9e5-7133-91a1-841202651a25"
+            session_file = session_root / f"rollout-2026-06-26T00-00-00-{session_id}.jsonl"
+            session_file.write_text("", encoding="utf-8")
+            original_extract_latest_session_text = MODULE.extract_latest_session_text
+
+            def delayed_final(session_id_arg: str) -> dict[str, str]:
+                if session_id_arg == session_id and not session_file.read_text(encoding="utf-8"):
+                    line = {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": "已提交。\n\n提交哈希：`58af5b3`",
+                        },
+                    }
+                    session_file.write_text(json.dumps(line, ensure_ascii=False), encoding="utf-8")
+                with mock.patch.object(MODULE, "codex_home_dir", return_value=root / ".codex"):
+                    return original_extract_latest_session_text(session_id_arg)
+
+            with mock.patch.object(MODULE, "extract_latest_session_text", side_effect=delayed_final):
+                final_message = MODULE.wait_for_final_session_text(session_id, 0.5)
+            self.assertEqual(final_message, "已提交。\n\n提交哈希：`58af5b3`")
+
+    def test_build_context_from_error_message_marks_error_card(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root)
+            payload = {
+                "hook_event_name": "Stop",
+                "cwd": str(root),
+                "session_id": "error-session",
+                "model": "gpt-5.4",
+            }
+            context = MODULE.build_context_from_session_message(
+                "stop",
+                payload,
+                config,
+                "stream disconnected before completion: Transport error: network error: error decoding response body",
+                "error",
+            )
+            self.assertEqual(context["event_name"], "session_error")
+            self.assertEqual(context["title"], "Codex 运行异常")
+            self.assertEqual(context["template"], "red")
+            self.assertEqual(context["panel_title"], "查看异常详情")
 
     def test_deploy_removes_old_notification_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

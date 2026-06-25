@@ -25,9 +25,7 @@ from typing import Any
 
 MANAGED_MARKER = "managed-by=vibe_feishu_hook"
 DEFAULT_ENABLED_EVENTS = [
-    "session_start",
     "pre_tool_use",
-    "post_tool_use",
     "permission_request",
     "stop",
 ]
@@ -58,7 +56,10 @@ TOOL_EVENT_NAMES = {"pre_tool_use", "post_tool_use"}
 HIGH_FREQUENCY_WINDOW_SECONDS = 15
 HIGH_FREQUENCY_MAX_EVENTS = 6
 QUIET_AFTER_USER_SECONDS = 15
+STOP_FINAL_WAIT_SECONDS = 4.0
+STOP_FINAL_POLL_INTERVAL_SECONDS = 0.25
 MAX_FEISHU_PAYLOAD_BYTES = 20 * 1024
+MAX_TEXT_MESSAGE_CHARS = 3500
 HOOK_STATUS_MESSAGE = "飞书过程通知"
 
 
@@ -191,6 +192,135 @@ def get_project_name(cwd: str) -> str:
 def hostname_short() -> str:
     name = socket.gethostname()
     return name.split(".", 1)[0]
+
+
+def codex_home_dir() -> Path:
+    env_home = os.environ.get("CODEX_HOME")
+    if env_home:
+        return Path(env_home).resolve(strict=False)
+    return Path.home() / ".codex"
+
+
+def find_session_file(session_id: str) -> Path | None:
+    if not session_id:
+        return None
+    sessions_root = codex_home_dir() / "sessions"
+    if not sessions_root.exists():
+        return None
+    matches = list(sessions_root.rglob(f"*{session_id}.jsonl"))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return matches[0]
+
+
+def iter_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                items.append(data)
+    return items
+
+
+def collect_session_messages(items: list[dict[str, Any]]) -> tuple[list[str], list[str], list[str]]:
+    commentary_messages: list[str] = []
+    final_messages: list[str] = []
+    error_messages: list[str] = []
+    for item in items:
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        content_type = payload.get("type")
+        if item.get("type") == "event_msg" and content_type == "agent_message":
+            message = payload.get("message")
+            phase = payload.get("phase")
+            if isinstance(message, str) and message.strip():
+                if phase == "commentary":
+                    commentary_messages.append(message)
+                elif phase == "final_answer":
+                    final_messages.append(message)
+        if item.get("type") == "event_msg" and content_type == "task_complete":
+            message = payload.get("last_agent_message")
+            if isinstance(message, str) and message.strip():
+                final_messages.append(message)
+        if item.get("type") == "event_msg" and content_type == "error":
+            message = payload.get("message")
+            if isinstance(message, str) and message.strip():
+                error_messages.append(message)
+    return commentary_messages, final_messages, error_messages
+
+
+def extract_latest_session_text(session_id: str) -> dict[str, str]:
+    session_file = find_session_file(session_id)
+    if session_file is None:
+        return {}
+    commentary_messages, final_messages, error_messages = collect_session_messages(iter_jsonl_objects(session_file))
+    result: dict[str, str] = {}
+    if commentary_messages:
+        result["commentary"] = commentary_messages[-1]
+    if final_messages:
+        result["final_answer"] = final_messages[-1]
+    if error_messages:
+        result["error"] = error_messages[-1]
+    return result
+
+
+def extract_session_text_update(session_id: str, state: HookState) -> dict[str, str]:
+    session_file = find_session_file(session_id)
+    if session_file is None:
+        return {}
+    all_items = iter_jsonl_objects(session_file)
+    cursor_key = f"session_cursor:{session_id}"
+    last_cursor_raw = state.get_kv(cursor_key)
+    try:
+        last_cursor = int(last_cursor_raw) if last_cursor_raw else 0
+    except ValueError:
+        last_cursor = 0
+    new_items = all_items[last_cursor:]
+    commentary_messages, final_messages, error_messages = collect_session_messages(new_items)
+    state.set_kv(cursor_key, str(len(all_items)))
+    result: dict[str, str] = {}
+    if commentary_messages:
+        result["commentary"] = commentary_messages[-1]
+    if final_messages:
+        result["final_answer"] = final_messages[-1]
+    if error_messages:
+        result["error"] = error_messages[-1]
+    return result
+
+
+def wait_for_final_session_text(session_id: str, timeout_seconds: float) -> str:
+    if not session_id:
+        return ""
+    deadline = time.time() + timeout_seconds
+    while True:
+        final_message = extract_latest_session_text(session_id).get("final_answer", "")
+        if final_message:
+            return final_message
+        if time.time() >= deadline:
+            return ""
+        time.sleep(STOP_FINAL_POLL_INTERVAL_SECONDS)
+
+
+def wait_for_terminal_session_text(session_id: str, timeout_seconds: float) -> dict[str, str]:
+    if not session_id:
+        return {}
+    deadline = time.time() + timeout_seconds
+    while True:
+        session_state = extract_latest_session_text(session_id)
+        if session_state.get("final_answer") or session_state.get("error"):
+            return session_state
+        if time.time() >= deadline:
+            return session_state
+        time.sleep(STOP_FINAL_POLL_INTERVAL_SECONDS)
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -357,6 +487,25 @@ class HookState:
         )
         self.connection.commit()
 
+    def get_kv(self, key: str) -> str:
+        row = self.connection.execute(
+            "SELECT value FROM kv WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return str(row[0]) if row else ""
+
+    def set_kv(self, key: str, value: str) -> None:
+        now = time.time()
+        self.connection.execute(
+            """
+            INSERT INTO kv(key, value, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, now),
+        )
+        self.connection.commit()
+
 
 def tool_matches_whitelist(tool_name: str, whitelist: list[str]) -> bool:
     if not tool_name:
@@ -462,6 +611,8 @@ def extract_event_context(event_name: str, payload: dict[str, Any], config: Hook
         "title": title,
         "template": template,
         "summary": summary,
+        "body_text": summary,
+        "delivery_mode": "card",
         "project": project,
         "cwd": cwd,
         "session_id": session_id,
@@ -474,16 +625,46 @@ def extract_event_context(event_name: str, payload: dict[str, Any], config: Hook
     }
 
 
+def build_context_from_session_message(
+    event_name: str,
+    payload: dict[str, Any],
+    config: HookConfig,
+    message: str,
+    phase: str,
+) -> dict[str, Any]:
+    context = extract_event_context(event_name, payload, config)
+    body_text = normalize_summary_source(message).strip()
+    summary = sanitize_summary(body_text, config.max_summary_length) or context["summary"]
+    context["summary"] = summary
+    context["body_text"] = body_text
+    context["delivery_mode"] = "card"
+    if phase == "commentary":
+        context["title"] = "Codex 过程更新"
+        context["template"] = "blue"
+        context["panel_title"] = "查看完整过程"
+    elif phase == "final_answer":
+        context["title"] = "Codex 任务完成"
+        context["template"] = "green"
+        context["panel_title"] = "查看完整结果"
+    elif phase == "error":
+        context["event_name"] = "session_error"
+        context["event_display_name"] = "SessionError"
+        context["title"] = "Codex 运行异常"
+        context["template"] = "red"
+        context["panel_title"] = "查看异常详情"
+    if config.keyword and config.keyword not in body_text and config.keyword not in context["title"]:
+        context["title"] = f"{config.keyword} {context['title']}"
+    return context
+
+
 def build_text_payload(context: dict[str, Any]) -> dict[str, Any]:
-    lines = [context["title"], context["summary"]]
-    lines.append(f"项目: {context['project']}")
-    lines.append(f"事件: {context['event_display_name']}")
-    if context["tool_name"]:
-        lines.append(f"工具: {context['tool_name']}")
-    if context["session_short"]:
-        lines.append(f"Session: {context['session_short']}")
-    if context["meta_line"]:
-        lines.append(context["meta_line"])
+    body_text = truncate_text(
+        normalize_summary_source(context.get("body_text") or context["summary"]).strip(),
+        MAX_TEXT_MESSAGE_CHARS,
+    )
+    lines = [context["title"]]
+    if body_text:
+        lines.extend(["", body_text])
     return {
         "msg_type": "text",
         "content": {
@@ -492,30 +673,121 @@ def build_text_payload(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_card_subtitle(context: dict[str, Any]) -> str:
+    parts = []
+    if context.get("project"):
+        parts.append(str(context["project"]))
+    return " · ".join(parts)
+
+
+def build_card_details(context: dict[str, Any]) -> str:
+    lines = []
+    if context.get("project"):
+        lines.append(f"项目：{context['project']}")
+    if context.get("event_display_name"):
+        lines.append(f"事件：{context['event_display_name']}")
+    if context.get("session_short"):
+        lines.append(f"Session：{context['session_short']}")
+    if context.get("model"):
+        lines.append(f"模型：{context['model']}")
+    if context.get("cwd"):
+        lines.append(f"路径：{context['cwd']}")
+    if context.get("timestamp_text"):
+        lines.append(f"时间：{context['timestamp_text']}")
+    return "\n".join(lines)
+
+
+def build_collapsible_panel(context: dict[str, Any], body_text: str) -> dict[str, Any]:
+    return {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "padding": "8px 8px 8px 8px",
+        "margin": "8px 0px 0px 0px",
+        "vertical_spacing": "8px",
+        "border": {
+            "color": "grey",
+            "corner_radius": "8px",
+        },
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": context.get("panel_title") or "查看完整内容",
+            },
+            "width": "fill",
+            "vertical_align": "center",
+            "icon": {
+                "tag": "standard_icon",
+                "token": "down-small-ccm_outlined",
+                "size": "16px 16px",
+            },
+            "icon_position": "right",
+            "icon_expanded_angle": -180,
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": body_text,
+                "text_align": "left",
+                "margin": "0px 0px 0px 0px",
+            }
+        ],
+    }
+
+
 def build_card_payload(context: dict[str, Any]) -> dict[str, Any]:
-    details_lines = [
-        f"**项目**: {safe_markdown_text(context['project'])}",
-        f"**事件**: {safe_markdown_text(context['event_display_name'])}",
+    summary_text = normalize_summary_source(context["summary"]).strip()
+    body_text = normalize_summary_source(context.get("body_text") or "").strip()
+    details_text = build_card_details(context)
+    elements = [
+        {
+            "tag": "markdown",
+            "content": summary_text,
+            "text_align": "left",
+            "margin": "0px 0px 8px 0px",
+        }
     ]
-    if context["tool_name"]:
-        details_lines.append(f"**工具**: {safe_markdown_text(context['tool_name'])}")
-    if context["session_short"]:
-        details_lines.append(f"**Session**: {safe_markdown_text(context['session_short'])}")
-    meta_lines = []
-    if context["meta_line"]:
-        meta_lines.append(safe_markdown_text(context["meta_line"]))
-    meta_lines.append(f"时间: {context['timestamp_text']}")
+    if details_text:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": details_text,
+                "text_align": "left",
+                "margin": "0px 0px 0px 0px",
+            }
+        )
+    if body_text and body_text != summary_text:
+        if details_text:
+            elements.append(
+                {
+                    "tag": "hr",
+                    "margin": "8px 0px 8px 0px",
+                }
+            )
+        elements.append(build_collapsible_panel(context, body_text))
     return {
         "msg_type": "interactive",
         "card": {
             "schema": "2.0",
             "config": {
                 "update_multi": True,
+                "style": {
+                    "text_size": {
+                        "normal_v2": {
+                            "default": "normal",
+                            "pc": "normal",
+                            "mobile": "normal",
+                        }
+                    }
+                },
             },
             "header": {
                 "title": {
                     "tag": "plain_text",
                     "content": context["title"],
+                },
+                "subtitle": {
+                    "tag": "plain_text",
+                    "content": build_card_subtitle(context),
                 },
                 "template": context["template"],
                 "padding": "12px 12px 12px 12px",
@@ -523,30 +795,7 @@ def build_card_payload(context: dict[str, Any]) -> dict[str, Any]:
             "body": {
                 "direction": "vertical",
                 "padding": "12px 12px 12px 12px",
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": safe_markdown_text(context["summary"]),
-                        "text_align": "left",
-                        "margin": "0px 0px 8px 0px",
-                    },
-                    {
-                        "tag": "markdown",
-                        "content": "\n".join(details_lines),
-                        "text_align": "left",
-                        "margin": "0px 0px 8px 0px",
-                    },
-                    {
-                        "tag": "hr",
-                        "margin": "8px 0px 8px 0px",
-                    },
-                    {
-                        "tag": "markdown",
-                        "content": "\n".join(meta_lines),
-                        "text_align": "left",
-                        "margin": "0px 0px 0px 0px",
-                    },
-                ],
+                "elements": elements,
             },
         },
     }
@@ -561,15 +810,35 @@ def apply_feishu_signature(payload: dict[str, Any], secret: str) -> None:
 
 
 def build_final_payload(context: dict[str, Any], config: HookConfig) -> dict[str, Any]:
-    card_payload = build_card_payload(context)
-    if len(json.dumps(card_payload, ensure_ascii=False).encode("utf-8")) > MAX_FEISHU_PAYLOAD_BYTES:
+    payload = build_card_payload(context)
+    if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_FEISHU_PAYLOAD_BYTES:
+        context = copy.deepcopy(context)
+        original_body = normalize_summary_source(context.get("body_text") or "").strip()
+        if original_body:
+            suffix = "\n\n（内容过长，已按飞书机器人请求体 20 KB 限制截断）"
+            low = 0
+            high = len(original_body)
+            best_body = ""
+            while low <= high:
+                mid = (low + high) // 2
+                candidate_body = original_body[:mid].rstrip()
+                if mid < len(original_body):
+                    candidate_body = f"{candidate_body}{suffix}"
+                context["body_text"] = candidate_body
+                candidate_payload = build_card_payload(context)
+                size = len(json.dumps(candidate_payload, ensure_ascii=False).encode("utf-8"))
+                if size <= MAX_FEISHU_PAYLOAD_BYTES:
+                    best_body = candidate_body
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            context["body_text"] = best_body
+        payload = build_card_payload(context)
+    if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_FEISHU_PAYLOAD_BYTES:
         context = copy.deepcopy(context)
         context["summary"] = truncate_text(context["summary"], 60)
-        card_payload = build_card_payload(context)
-    if len(json.dumps(card_payload, ensure_ascii=False).encode("utf-8")) > MAX_FEISHU_PAYLOAD_BYTES:
-        payload = build_text_payload(context)
-    else:
-        payload = card_payload
+        context["body_text"] = ""
+        payload = build_card_payload(context)
     if config.secret:
         apply_feishu_signature(payload, config.secret)
     return payload
@@ -647,8 +916,10 @@ def should_process_event(event_name: str, payload: dict[str, Any], config: HookC
     if not any(is_path_within(cwd_path, root) for root in config.allowed_roots):
         return False, "cwd not in allowed roots"
     session_id = get_payload_value(payload, "session_id")
-    if event_name in {"session_start", "pre_tool_use", "post_tool_use"} and state.get_quiet_until(session_id) > time.time():
+    if event_name in {"pre_tool_use"} and state.get_quiet_until(session_id) > time.time():
         return False, "quiet window active"
+    if event_name == "post_tool_use":
+        return False, "post tool use disabled"
     if event_name in TOOL_EVENT_NAMES:
         tool_name = extract_tool_name(payload)
         if not tool_matches_whitelist(tool_name, config.tool_whitelist):
@@ -670,15 +941,46 @@ def run_hook(event_name: str, payload: dict[str, Any], config: HookConfig) -> in
         if not should_process:
             write_log(config, f"skip event={event_name} reason={reason}")
             return 0
-        context = extract_event_context(event_name, payload, config)
+        session_id = get_payload_value(payload, "session_id")
+        session_updates = extract_session_text_update(session_id, state)
+
+        if event_name == "pre_tool_use":
+            commentary_message = session_updates.get("commentary")
+            if not commentary_message:
+                write_log(config, f"skip event={event_name} reason=no new commentary session={session_id}")
+                return 0
+            context = build_context_from_session_message(event_name, payload, config, commentary_message, "commentary")
+        elif event_name == "stop":
+            terminal_state = session_updates
+            if not terminal_state.get("final_answer") and not terminal_state.get("error"):
+                terminal_state = wait_for_terminal_session_text(session_id, STOP_FINAL_WAIT_SECONDS)
+            final_message = terminal_state.get("final_answer") or session_updates.get("final_answer", "")
+            error_message = terminal_state.get("error") or session_updates.get("error", "")
+            if final_message:
+                context = build_context_from_session_message(event_name, payload, config, final_message, "final_answer")
+            elif error_message:
+                context = build_context_from_session_message(event_name, payload, config, error_message, "error")
+            elif get_payload_value(payload, "last_assistant_message"):
+                context = build_context_from_session_message(
+                    event_name,
+                    payload,
+                    config,
+                    get_payload_value(payload, "last_assistant_message"),
+                    "final_answer",
+                )
+            else:
+                context = extract_event_context(event_name, payload, config)
+        else:
+            context = extract_event_context(event_name, payload, config)
+
         if state.recently_sent(
             context["session_id"],
-            event_name,
+            context["event_name"],
             context["tool_name"],
             context["summary"],
             config.dedupe_window_seconds,
         ):
-            write_log(config, f"dedupe skip event={event_name} session={context['session_id']}")
+            write_log(config, f"dedupe skip event={context['event_name']} session={context['session_id']}")
             return 0
         if event_name in TOOL_EVENT_NAMES:
             count = state.recent_tool_event_count(context["session_id"], HIGH_FREQUENCY_WINDOW_SECONDS)
@@ -691,11 +993,11 @@ def run_hook(event_name: str, payload: dict[str, Any], config: HookConfig) -> in
                 return 0
         payload_to_send = build_final_payload(context, config)
         response = send_to_feishu(payload_to_send, config)
-        state.record_event(context["session_id"], event_name, context["tool_name"], context["summary"])
+        state.record_event(context["session_id"], context["event_name"], context["tool_name"], context["summary"])
         write_log(
             config,
             "sent "
-            f"event={event_name} session={context['session_id']} "
+            f"event={context['event_name']} session={context['session_id']} "
             f"tool={context['tool_name'] or '-'} response_code={response.get('code')}",
         )
         return 0
@@ -823,22 +1125,10 @@ def build_hook_handler(script_path: Path, config_path: Path, event_name: str) ->
 
 def build_hook_groups(script_path: Path, config_path: Path) -> dict[str, list[dict[str, Any]]]:
     return {
-        "SessionStart": [
-            {
-                "matcher": "startup|resume|clear|compact",
-                "hooks": [build_hook_handler(script_path, config_path, "session_start")],
-            }
-        ],
         "PreToolUse": [
             {
                 "matcher": "*",
                 "hooks": [build_hook_handler(script_path, config_path, "pre_tool_use")],
-            }
-        ],
-        "PostToolUse": [
-            {
-                "matcher": "*",
-                "hooks": [build_hook_handler(script_path, config_path, "post_tool_use")],
             }
         ],
         "PermissionRequest": [
@@ -1011,7 +1301,16 @@ def main() -> int:
     if args.command == "hook":
         return run_hook(event_name, payload, config)
 
-    context = extract_event_context(event_name, payload, config)
+    if event_name == "stop" and get_payload_value(payload, "last_assistant_message"):
+        context = build_context_from_session_message(
+            event_name,
+            payload,
+            config,
+            get_payload_value(payload, "last_assistant_message"),
+            "final_answer",
+        )
+    else:
+        context = extract_event_context(event_name, payload, config)
     final_payload = build_final_payload(context, config)
     if args.command == "render":
         print(json.dumps(final_payload, ensure_ascii=False, indent=2))

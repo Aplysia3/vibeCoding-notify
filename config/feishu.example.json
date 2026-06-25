@@ -3,9 +3,7 @@
   "secret": "",
   "keyword": "",
   "enabled_events": [
-    "session_start",
     "pre_tool_use",
-    "post_tool_use",
     "permission_request",
     "stop"
   ],
