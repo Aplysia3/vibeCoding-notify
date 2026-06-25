@@ -1,0 +1,8 @@
+config/feishu.local.json
+state/
+logs/
+*.bak-feishu-codex-*
+*.tmp
+*.log
+__pycache__/
+tests/__pycache__/

@@ -1,0 +1,30 @@
+{
+  "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/your-token",
+  "secret": "",
+  "keyword": "",
+  "enabled_events": [
+    "session_start",
+    "pre_tool_use",
+    "post_tool_use",
+    "permission_request",
+    "stop"
+  ],
+  "allowed_roots": [
+    "D:\\WorkDic\\Program\\vibeCoding-notify"
+  ],
+  "tool_whitelist": [
+    "Bash",
+    "apply_patch",
+    "Edit",
+    "Write",
+    "web.search*",
+    "mcp__*"
+  ],
+  "request_timeout_seconds": 10,
+  "dedupe_window_seconds": 5,
+  "tool_event_min_interval_seconds": 3,
+  "max_summary_length": 100,
+  "send_subagent_events": false,
+  "log_path": "logs/feishu-codex-hook.log",
+  "state_dir": "state"
+}
