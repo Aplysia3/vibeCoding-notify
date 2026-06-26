@@ -67,6 +67,7 @@ HOOK_STATUS_MESSAGE = "飞书过程通知"
 class HookConfig:
     webhook: str
     process_webhook: str
+    codex_alias: str
     secret: str
     keyword: str
     enabled_events: list[str]
@@ -353,6 +354,7 @@ def load_config(path: Path) -> HookConfig:
     return HookConfig(
         webhook=str(raw.get("webhook") or "").strip(),
         process_webhook=str(raw.get("process_webhook") or "").strip(),
+        codex_alias=str(raw.get("codex_alias") or "Codex").strip() or "Codex",
         secret=str(raw.get("secret") or "").strip(),
         keyword=str(raw.get("keyword") or "").strip(),
         enabled_events=[str(item).strip() for item in (raw.get("enabled_events") or DEFAULT_ENABLED_EVENTS)],
@@ -615,6 +617,7 @@ def extract_event_context(event_name: str, payload: dict[str, Any], config: Hook
         "summary": summary,
         "body_text": summary,
         "delivery_mode": "card",
+        "codex_alias": config.codex_alias,
         "project": project,
         "cwd": cwd,
         "session_id": session_id,
@@ -691,6 +694,7 @@ def build_card_details(context: dict[str, Any]) -> str:
         safe_value = safe_markdown_text(str(value))
         lines.append(f"**{label}：** {safe_value}")
 
+    append_detail("Codex", context.get("codex_alias") or "Codex")
     append_detail("项目", context.get("project"))
     append_detail("事件", context.get("event_display_name"))
     append_detail("Session", context.get("session_short"))

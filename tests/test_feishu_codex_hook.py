@@ -24,6 +24,7 @@ class FeishuCodexHookTests(unittest.TestCase):
         config_data = {
             "webhook": "https://example.invalid/hook",
             "process_webhook": "https://example.invalid/process-hook",
+            "codex_alias": "4080s codex",
             "secret": "",
             "keyword": "",
             "enabled_events": MODULE.DEFAULT_ENABLED_EVENTS,
@@ -69,6 +70,7 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertEqual(context["title"], "Codex 需要授权")
             self.assertEqual(context["template"], "orange")
             self.assertEqual(context["summary"], "请求执行 Bash 命令：git push origin main")
+            self.assertEqual(context["codex_alias"], "4080s codex")
 
     def test_extract_event_context_for_stop(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -98,6 +100,7 @@ class FeishuCodexHookTests(unittest.TestCase):
                 "summary": "已完成训练状态检查。",
                 "body_text": "已完成训练状态检查。\n\n不会发送第二段。",
                 "delivery_mode": "card",
+                "codex_alias": "4080s codex",
                 "project": "demo",
                 "cwd": str(root),
                 "session_id": "abc123456",
@@ -112,6 +115,7 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertEqual(payload["msg_type"], "interactive")
             self.assertEqual(payload["card"]["header"]["title"]["content"], "Codex 任务完成")
             elements = payload["card"]["body"]["elements"]
+            self.assertIn("**Codex：** 4080s codex", elements[0]["content"])
             self.assertIn("**项目：** demo", elements[0]["content"])
             self.assertEqual(elements[1]["tag"], "hr")
             self.assertEqual(elements[2]["content"], "已完成训练状态检查。")
@@ -154,6 +158,7 @@ class FeishuCodexHookTests(unittest.TestCase):
             "summary": "已提交。",
             "body_text": "已提交。\n\n提交信息：新增 Codex 到飞书的实时过程 Hook",
             "delivery_mode": "card",
+            "codex_alias": "4080s codex",
             "project": "vibeCoding-notify",
             "cwd": "D:\\WorkDic\\Program\\vibeCoding-notify",
             "session_id": "abc123456",
@@ -169,6 +174,7 @@ class FeishuCodexHookTests(unittest.TestCase):
         self.assertEqual(payload["msg_type"], "interactive")
         elements = payload["card"]["body"]["elements"]
         self.assertEqual(elements[0]["tag"], "markdown")
+        self.assertIn("**Codex：** 4080s codex", elements[0]["content"])
         self.assertIn("**项目：** vibeCoding-notify", elements[0]["content"])
         self.assertIn("**事件：** Stop", elements[0]["content"])
         self.assertIn("**Session：** abc12345", elements[0]["content"])
