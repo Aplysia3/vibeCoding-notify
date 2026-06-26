@@ -2,6 +2,7 @@
   "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/your-token",
   "process_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/your-process-token",
   "codex_alias": "Codex",
+  "codex_alias_tag_color": "orange",
   "secret": "",
   "keyword": "",
   "enabled_events": [
