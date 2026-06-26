@@ -741,31 +741,33 @@ def build_card_payload(context: dict[str, Any]) -> dict[str, Any]:
     summary_text = normalize_summary_source(context["summary"]).strip()
     body_text = normalize_summary_source(context.get("body_text") or "").strip()
     details_text = build_card_details(context)
-    elements = [
-        {
-            "tag": "markdown",
-            "content": summary_text,
-            "text_align": "left",
-            "margin": "0px 0px 8px 0px",
-        }
-    ]
+    elements = []
     if details_text:
         elements.append(
             {
                 "tag": "markdown",
                 "content": details_text,
                 "text_align": "left",
-                "margin": "0px 0px 0px 0px",
+                "margin": "0px 0px 8px 0px",
             }
         )
-    if body_text and body_text != summary_text:
-        if details_text:
+        if summary_text or body_text:
             elements.append(
                 {
                     "tag": "hr",
                     "margin": "8px 0px 8px 0px",
                 }
             )
+    if summary_text:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": summary_text,
+                "text_align": "left",
+                "margin": "0px 0px 8px 0px",
+            }
+        )
+    if body_text and body_text != summary_text:
         elements.append(build_collapsible_panel(context, body_text))
     return {
         "msg_type": "interactive",

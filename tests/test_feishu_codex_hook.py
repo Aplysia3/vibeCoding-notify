@@ -111,7 +111,10 @@ class FeishuCodexHookTests(unittest.TestCase):
             payload = MODULE.build_final_payload(context, config)
             self.assertEqual(payload["msg_type"], "interactive")
             self.assertEqual(payload["card"]["header"]["title"]["content"], "Codex 任务完成")
-            self.assertEqual(payload["card"]["body"]["elements"][0]["content"], "已完成训练状态检查。")
+            elements = payload["card"]["body"]["elements"]
+            self.assertIn("**项目：** demo", elements[0]["content"])
+            self.assertEqual(elements[1]["tag"], "hr")
+            self.assertEqual(elements[2]["content"], "已完成训练状态检查。")
 
     def test_build_context_from_session_message_uses_text_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -166,14 +169,15 @@ class FeishuCodexHookTests(unittest.TestCase):
         self.assertEqual(payload["msg_type"], "interactive")
         elements = payload["card"]["body"]["elements"]
         self.assertEqual(elements[0]["tag"], "markdown")
-        self.assertEqual(elements[1]["tag"], "markdown")
-        self.assertIn("**项目：** vibeCoding-notify", elements[1]["content"])
-        self.assertIn("**事件：** Stop", elements[1]["content"])
-        self.assertIn("**Session：** abc12345", elements[1]["content"])
-        self.assertIn("**模型：** gpt-5.4", elements[1]["content"])
-        self.assertIn("**路径：** D:\\\\WorkDic\\\\Program\\\\vibeCoding-notify", elements[1]["content"])
-        self.assertIn("**时间：** 2026-06-26 01:00:00", elements[1]["content"])
-        self.assertEqual(elements[2]["tag"], "hr")
+        self.assertIn("**项目：** vibeCoding-notify", elements[0]["content"])
+        self.assertIn("**事件：** Stop", elements[0]["content"])
+        self.assertIn("**Session：** abc12345", elements[0]["content"])
+        self.assertIn("**模型：** gpt-5.4", elements[0]["content"])
+        self.assertIn("**路径：** D:\\\\WorkDic\\\\Program\\\\vibeCoding-notify", elements[0]["content"])
+        self.assertIn("**时间：** 2026-06-26 01:00:00", elements[0]["content"])
+        self.assertEqual(elements[1]["tag"], "hr")
+        self.assertEqual(elements[2]["tag"], "markdown")
+        self.assertEqual(elements[2]["content"], "已提交。")
         self.assertEqual(elements[3]["tag"], "collapsible_panel")
         self.assertEqual(elements[3]["header"]["title"]["content"], "查看完整结果")
         self.assertEqual(
