@@ -1,5 +1,6 @@
 {
   "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/your-token",
+  "process_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/your-process-token",
   "secret": "",
   "keyword": "",
   "enabled_events": [

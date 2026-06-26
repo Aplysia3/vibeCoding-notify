@@ -66,6 +66,7 @@ HOOK_STATUS_MESSAGE = "飞书过程通知"
 @dataclass
 class HookConfig:
     webhook: str
+    process_webhook: str
     secret: str
     keyword: str
     enabled_events: list[str]
@@ -351,6 +352,7 @@ def load_config(path: Path) -> HookConfig:
         state_dir = (repo_root / state_dir).resolve(strict=False)
     return HookConfig(
         webhook=str(raw.get("webhook") or "").strip(),
+        process_webhook=str(raw.get("process_webhook") or "").strip(),
         secret=str(raw.get("secret") or "").strip(),
         keyword=str(raw.get("keyword") or "").strip(),
         enabled_events=[str(item).strip() for item in (raw.get("enabled_events") or DEFAULT_ENABLED_EVENTS)],
@@ -682,18 +684,19 @@ def build_card_subtitle(context: dict[str, Any]) -> str:
 
 def build_card_details(context: dict[str, Any]) -> str:
     lines = []
-    if context.get("project"):
-        lines.append(f"项目：{context['project']}")
-    if context.get("event_display_name"):
-        lines.append(f"事件：{context['event_display_name']}")
-    if context.get("session_short"):
-        lines.append(f"Session：{context['session_short']}")
-    if context.get("model"):
-        lines.append(f"模型：{context['model']}")
-    if context.get("cwd"):
-        lines.append(f"路径：{context['cwd']}")
-    if context.get("timestamp_text"):
-        lines.append(f"时间：{context['timestamp_text']}")
+
+    def append_detail(label: str, value: Any) -> None:
+        if value in (None, ""):
+            return
+        safe_value = safe_markdown_text(str(value))
+        lines.append(f"**{label}：** {safe_value}")
+
+    append_detail("项目", context.get("project"))
+    append_detail("事件", context.get("event_display_name"))
+    append_detail("Session", context.get("session_short"))
+    append_detail("模型", context.get("model"))
+    append_detail("路径", context.get("cwd"))
+    append_detail("时间", context.get("timestamp_text"))
     return "\n".join(lines)
 
 
@@ -844,12 +847,18 @@ def build_final_payload(context: dict[str, Any], config: HookConfig) -> dict[str
     return payload
 
 
-def send_to_feishu(payload: dict[str, Any], config: HookConfig) -> dict[str, Any]:
-    if not config.webhook:
+def resolve_target_webhook(context: dict[str, Any], config: HookConfig) -> str:
+    if context.get("event_name") == "pre_tool_use" and config.process_webhook:
+        return config.process_webhook
+    return config.webhook
+
+
+def send_to_feishu(payload: dict[str, Any], webhook: str, config: HookConfig) -> dict[str, Any]:
+    if not webhook:
         raise ValueError("缺少 webhook 配置")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        config.webhook,
+        webhook,
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -992,13 +1001,15 @@ def run_hook(event_name: str, payload: dict[str, Any], config: HookConfig) -> in
                 write_log(config, f"tool interval skip event={event_name} session={context['session_id']}")
                 return 0
         payload_to_send = build_final_payload(context, config)
-        response = send_to_feishu(payload_to_send, config)
+        target_webhook = resolve_target_webhook(context, config)
+        response = send_to_feishu(payload_to_send, target_webhook, config)
         state.record_event(context["session_id"], context["event_name"], context["tool_name"], context["summary"])
         write_log(
             config,
             "sent "
             f"event={context['event_name']} session={context['session_id']} "
-            f"tool={context['tool_name'] or '-'} response_code={response.get('code')}",
+            f"tool={context['tool_name'] or '-'} webhook={'process' if target_webhook == config.process_webhook and config.process_webhook else 'default'} "
+            f"response_code={response.get('code')}",
         )
         return 0
     finally:
@@ -1316,7 +1327,7 @@ def main() -> int:
         print(json.dumps(final_payload, ensure_ascii=False, indent=2))
         return 0
     if args.command == "test-send":
-        response = send_to_feishu(final_payload, config)
+        response = send_to_feishu(final_payload, resolve_target_webhook(context, config), config)
         print(json.dumps({"payload": final_payload, "response": response}, ensure_ascii=False, indent=2))
         return 0
     raise SystemExit(f"未知命令: {args.command}")

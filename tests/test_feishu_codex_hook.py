@@ -23,6 +23,7 @@ class FeishuCodexHookTests(unittest.TestCase):
         config_path = root / "config.json"
         config_data = {
             "webhook": "https://example.invalid/hook",
+            "process_webhook": "https://example.invalid/process-hook",
             "secret": "",
             "keyword": "",
             "enabled_events": MODULE.DEFAULT_ENABLED_EVENTS,
@@ -166,12 +167,12 @@ class FeishuCodexHookTests(unittest.TestCase):
         elements = payload["card"]["body"]["elements"]
         self.assertEqual(elements[0]["tag"], "markdown")
         self.assertEqual(elements[1]["tag"], "markdown")
-        self.assertIn("项目：vibeCoding-notify", elements[1]["content"])
-        self.assertIn("事件：Stop", elements[1]["content"])
-        self.assertIn("Session：abc12345", elements[1]["content"])
-        self.assertIn("模型：gpt-5.4", elements[1]["content"])
-        self.assertIn("路径：D:\\WorkDic\\Program\\vibeCoding-notify", elements[1]["content"])
-        self.assertIn("时间：2026-06-26 01:00:00", elements[1]["content"])
+        self.assertIn("**项目：** vibeCoding-notify", elements[1]["content"])
+        self.assertIn("**事件：** Stop", elements[1]["content"])
+        self.assertIn("**Session：** abc12345", elements[1]["content"])
+        self.assertIn("**模型：** gpt-5.4", elements[1]["content"])
+        self.assertIn("**路径：** D:\\\\WorkDic\\\\Program\\\\vibeCoding-notify", elements[1]["content"])
+        self.assertIn("**时间：** 2026-06-26 01:00:00", elements[1]["content"])
         self.assertEqual(elements[2]["tag"], "hr")
         self.assertEqual(elements[3]["tag"], "collapsible_panel")
         self.assertEqual(elements[3]["header"]["title"]["content"], "查看完整结果")
@@ -186,6 +187,20 @@ class FeishuCodexHookTests(unittest.TestCase):
             MODULE.apply_feishu_signature(payload, "demo")
         self.assertEqual(payload["timestamp"], "1599360473")
         self.assertEqual(payload["sign"], "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8=")
+
+    def test_resolve_target_webhook_routes_process_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root)
+            process_context = {"event_name": "pre_tool_use"}
+            stop_context = {"event_name": "stop"}
+            error_context = {"event_name": "session_error"}
+            self.assertEqual(
+                MODULE.resolve_target_webhook(process_context, config),
+                "https://example.invalid/process-hook",
+            )
+            self.assertEqual(MODULE.resolve_target_webhook(stop_context, config), "https://example.invalid/hook")
+            self.assertEqual(MODULE.resolve_target_webhook(error_context, config), "https://example.invalid/hook")
 
     def test_read_stdin_json_prefers_utf8_bytes(self) -> None:
         payload = {"last_assistant_message": "2。", "hook_event_name": "Stop"}
