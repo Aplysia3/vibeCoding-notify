@@ -64,6 +64,72 @@ py -3 --version
 
 ## Quick Start
 
+The recommended path is the interactive setup wizard. It checks for Python 3.10+, asks for Feishu webhook settings, can send a test message, and can deploy the Codex hooks for you.
+
+```powershell
+.\scripts\setup.cmd
+```
+
+You can also run the Python wizard directly:
+
+```powershell
+py -3 .\scripts\feishu_codex_hook.py setup
+```
+
+### Automatic Deployment Flow
+
+The setup wizard runs in this order:
+
+1. Check the Python runtime.
+
+   `scripts/setup.cmd` tries `py -3`, `python`, and `python3`, then verifies that the version is Python 3.10 or later. The deployed hook also uses the working Python command found during setup so Codex can run the hook later.
+
+2. Read or create the local config.
+
+   The default config path is `config/feishu.local.json`. If it already exists, the wizard keeps its current values as defaults. If it does not exist, the wizard starts from `config/feishu.example.json`. Do not commit `config/feishu.local.json`, because it stores local webhook and secret values.
+
+3. Ask for Feishu bot settings.
+
+   - `webhook`: required main bot webhook for permission, final, and error notifications.
+   - `process_webhook`: optional process bot webhook; when empty, process notifications use `webhook`.
+   - `codex_alias`: the Codex label shown in cards, for example `user_codex`.
+   - `codex_alias_tag_color`: the Feishu card tag color for the Codex label.
+   - `secret`: Feishu bot signature secret; leave empty when signature verification is disabled.
+   - `keyword`: Feishu bot keyword validation; leave empty when keyword validation is disabled.
+   - `allowed_roots`: notification scope. Global mode writes `[]`, meaning all Codex working directories are handled. Current-repo or manual-directory modes only handle Codex sessions under those paths.
+   - `send_subagent_events`: whether to send subagent events; disabled by default to reduce noise.
+
+4. Write the config file.
+
+   The wizard writes the final result to `config/feishu.local.json` and fills required defaults such as `enabled_events`, `tool_whitelist`, `log_path`, and `state_dir`.
+
+5. Optionally send a test message.
+
+   If enabled, the wizard sends a simulated `Stop` notification with the new config. If the test fails, it prints the error and asks whether to continue deploying the Codex hook anyway.
+
+6. Optionally write Codex hooks.
+
+   When deployment is confirmed, the wizard updates the user-level `~/.codex/hooks.json`: it backs up the current file, removes old notification hooks recognized by this project, keeps unrelated hooks, and writes the managed `PreToolUse`, `PermissionRequest`, `Stop`, and `UserPromptSubmit` hooks.
+
+7. Trust the hook in Codex.
+
+   After deployment, run `/hooks` inside Codex and trust the newly added hook. Until this is done, Codex may not execute the new command.
+
+Useful wizard flags:
+
+```powershell
+# Skip the Feishu test message
+.\scripts\setup.cmd --skip-test
+
+# Only create or update config\feishu.local.json; do not write hooks.json
+.\scripts\setup.cmd --no-deploy
+
+# Use a custom config path or Codex user directory
+.\scripts\setup.cmd --config .\config\feishu.local.json --codex-home "$HOME\.codex"
+```
+
+Manual setup steps are still available below.
+
 1. Clone or download the repository.
 
 ```powershell
@@ -124,7 +190,7 @@ See [config/feishu.example.json](./config/feishu.example.json) for the full conf
 | --- | --- | --- |
 | `webhook` | Example URL | Main Feishu bot webhook for permission, final, and error notifications |
 | `process_webhook` | Example URL | Process notification webhook; falls back to `webhook` when empty |
-| `codex_alias` | `Codex` | Codex label displayed in cards, for example `4080s codex` |
+| `codex_alias` | `Codex` | Codex label displayed in cards, for example `user_codex` |
 | `codex_alias_tag_color` | `orange` | Feishu `text_tag` color |
 | `secret` | Empty string | Feishu bot signature secret; leave empty when signature verification is disabled |
 | `keyword` | Empty string | Feishu bot keyword validation; configured keywords are injected into card titles |

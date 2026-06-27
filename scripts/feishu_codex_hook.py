@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import getpass
 import hashlib
 import html
 import hmac
@@ -31,6 +32,11 @@ DEFAULT_ENABLED_EVENTS = [
     "stop",
 ]
 DEFAULT_TOOL_WHITELIST = ["Bash", "apply_patch", "Edit", "Write", "web.search*", "mcp__*"]
+MIN_PYTHON_VERSION = (3, 10)
+FEISHU_WEBHOOK_PREFIXES = (
+    "https://open.feishu.cn/open-apis/bot/v2/hook/",
+    "https://open.larksuite.com/open-apis/bot/v2/hook/",
+)
 TEXT_TAG_COLORS = {
     "neutral",
     "blue",
@@ -367,6 +373,174 @@ def write_json_file(path: Path, data: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+
+
+def inspect_python_runtime(
+    version_info: tuple[int, ...] | None = None,
+    executable: str | None = None,
+) -> dict[str, Any]:
+    version = tuple(version_info or sys.version_info[:3])
+    executable_value = sys.executable if executable is None else executable
+    return {
+        "version": ".".join(str(part) for part in version[:3]),
+        "executable": executable_value,
+        "supported": version >= MIN_PYTHON_VERSION,
+        "minimum": ".".join(str(part) for part in MIN_PYTHON_VERSION),
+    }
+
+
+def ensure_supported_python() -> dict[str, Any]:
+    runtime = inspect_python_runtime()
+    if not runtime["supported"]:
+        raise SystemExit(
+            f"需要 Python {runtime['minimum']} 或更高版本，当前版本是 {runtime['version']}。"
+        )
+    if not runtime["executable"]:
+        raise SystemExit("未能定位当前 Python 解释器，请确认 python 或 py 命令可用。")
+    return runtime
+
+
+def load_setup_defaults(config_path: Path, repo_root: Path) -> dict[str, Any]:
+    example_path = repo_root / "config" / "feishu.example.json"
+    if config_path.exists():
+        base = load_json_file(config_path)
+    elif example_path.exists():
+        base = load_json_file(example_path)
+    else:
+        base = {}
+    return complete_config_data(base)
+
+
+def complete_config_data(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "webhook": str(raw.get("webhook") or "").strip(),
+        "process_webhook": str(raw.get("process_webhook") or "").strip(),
+        "codex_alias": str(raw.get("codex_alias") or "Codex").strip() or "Codex",
+        "codex_alias_tag_color": normalize_text_tag_color(raw.get("codex_alias_tag_color")),
+        "secret": str(raw.get("secret") or "").strip(),
+        "keyword": str(raw.get("keyword") or "").strip(),
+        "enabled_events": [str(item).strip() for item in (raw.get("enabled_events") or DEFAULT_ENABLED_EVENTS)],
+        "allowed_roots": [str(item).strip() for item in (raw.get("allowed_roots") or []) if str(item).strip()],
+        "tool_whitelist": [str(item).strip() for item in (raw.get("tool_whitelist") or DEFAULT_TOOL_WHITELIST)],
+        "request_timeout_seconds": int(raw.get("request_timeout_seconds") or 10),
+        "dedupe_window_seconds": int(raw.get("dedupe_window_seconds") or 5),
+        "tool_event_min_interval_seconds": int(raw.get("tool_event_min_interval_seconds") or 3),
+        "max_summary_length": int(raw.get("max_summary_length") or 100),
+        "send_subagent_events": bool(raw.get("send_subagent_events", False)),
+        "log_path": str(raw.get("log_path") or "logs/feishu-codex-hook.log"),
+        "state_dir": str(raw.get("state_dir") or "state"),
+    }
+
+
+def is_placeholder_webhook(value: str) -> bool:
+    lowered = value.strip().lower()
+    return not lowered or "your-token" in lowered or "your-process-token" in lowered
+
+
+def looks_like_feishu_webhook(value: str) -> bool:
+    normalized = value.strip()
+    return any(normalized.startswith(prefix) for prefix in FEISHU_WEBHOOK_PREFIXES)
+
+
+def prompt_text(prompt: str, default: str = "", required: bool = False, hidden: bool = False) -> str:
+    suffix = f" [{default}]" if default and not hidden else ""
+    while True:
+        reader = getpass.getpass if hidden else input
+        value = reader(f"{prompt}{suffix}: ").strip()
+        if value:
+            return value
+        if default:
+            return default
+        if not required:
+            return ""
+        print("此项必填，请重新输入。")
+
+
+def prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    while True:
+        value = input(f"{prompt} [{suffix}]: ").strip().lower()
+        if not value:
+            return default
+        if value in {"y", "yes", "1", "true"}:
+            return True
+        if value in {"n", "no", "0", "false"}:
+            return False
+        print("请输入 y 或 n。")
+
+
+def prompt_choice(prompt: str, choices: set[str], default: str) -> str:
+    while True:
+        value = input(f"{prompt} [{default}]: ").strip() or default
+        if value in choices:
+            return value
+        print(f"请输入以下选项之一：{', '.join(sorted(choices))}。")
+
+
+def prompt_required_webhook(default: str = "") -> str:
+    clean_default = "" if is_placeholder_webhook(default) else default
+    while True:
+        webhook = prompt_text("飞书主机器人 webhook", clean_default, required=True)
+        if looks_like_feishu_webhook(webhook):
+            return webhook
+        if prompt_yes_no("这个地址不像飞书自定义机器人 webhook，仍然使用吗", default=False):
+            return webhook
+
+
+def prompt_optional_webhook(default: str = "") -> str:
+    clean_default = "" if is_placeholder_webhook(default) else default
+    while True:
+        webhook = prompt_text("过程通知 webhook（留空则复用主机器人）", clean_default)
+        if not webhook or looks_like_feishu_webhook(webhook):
+            return webhook
+        if prompt_yes_no("这个地址不像飞书自定义机器人 webhook，仍然使用吗", default=False):
+            return webhook
+
+
+def prompt_allowed_roots(repo_root: Path, current_roots: list[str]) -> list[str]:
+    print("\n通知范围：")
+    print("  1. 全局生效（所有 Codex 工作目录）")
+    print("  2. 仅当前仓库")
+    print("  3. 手动输入目录列表")
+    default_choice = "1" if not current_roots else "3"
+    choice = prompt_choice("请选择通知范围", {"1", "2", "3"}, default_choice)
+    if choice == "1":
+        return []
+    if choice == "2":
+        return [str(repo_root)]
+    raw = prompt_text("请输入目录，多个目录用逗号或分号分隔", "; ".join(current_roots), required=True)
+    return [item.strip() for item in re.split(r"[;,]", raw) if item.strip()]
+
+
+def build_setup_config(repo_root: Path, config_path: Path) -> dict[str, Any]:
+    config_data = load_setup_defaults(config_path, repo_root)
+    print("\n请按提示填写飞书机器人信息。直接回车会保留括号中的默认值。")
+    config_data["webhook"] = prompt_required_webhook(config_data.get("webhook", ""))
+    config_data["process_webhook"] = prompt_optional_webhook(config_data.get("process_webhook", ""))
+    config_data["codex_alias"] = prompt_text("通知卡片中的 Codex 名称", config_data.get("codex_alias", "Codex")) or "Codex"
+    config_data["codex_alias_tag_color"] = normalize_text_tag_color(
+        prompt_text("Codex 名称标签颜色", config_data.get("codex_alias_tag_color", "orange"))
+    )
+    config_data["secret"] = prompt_text(
+        "飞书签名密钥 secret（未开启签名可留空）",
+        config_data.get("secret", ""),
+        hidden=bool(config_data.get("secret")),
+    )
+    config_data["keyword"] = prompt_text("飞书关键词校验 keyword（未开启可留空）", config_data.get("keyword", ""))
+    config_data["allowed_roots"] = prompt_allowed_roots(repo_root, list(config_data.get("allowed_roots") or []))
+    config_data["send_subagent_events"] = prompt_yes_no(
+        "是否发送子代理事件通知",
+        bool(config_data.get("send_subagent_events", False)),
+    )
+    return complete_config_data(config_data)
+
+
+def current_python_command() -> list[str]:
+    if sys.executable:
+        return [sys.executable]
+    if os.name == "nt":
+        return ["py", "-3"]
+    return ["python3"]
 
 
 def load_config(path: Path) -> HookConfig:
@@ -1162,8 +1336,9 @@ def build_command_parts(script_path: Path, config_path: Path, event_name: str) -
 
 
 def build_hook_handler(script_path: Path, config_path: Path, event_name: str) -> dict[str, Any]:
-    posix_parts = ["python3", *build_command_parts(script_path, config_path, event_name)]
-    windows_parts = ["py", "-3", *build_command_parts(script_path, config_path, event_name)]
+    python_parts = current_python_command()
+    posix_parts = [*python_parts, *build_command_parts(script_path, config_path, event_name)]
+    windows_parts = [*python_parts, *build_command_parts(script_path, config_path, event_name)]
     return {
         "type": "command",
         "command": shlex.join(posix_parts),
@@ -1270,10 +1445,65 @@ def undeploy_hooks(codex_home: Path) -> dict[str, Any]:
     return {"hooks_path": str(hooks_path), "removed": removed}
 
 
+def run_setup_wizard(config_path: Path, codex_home: Path, skip_test: bool, no_deploy: bool) -> int:
+    runtime = ensure_supported_python()
+    repo_root = project_root_from_script()
+    config_path = config_path.resolve(strict=False)
+    codex_home = codex_home.resolve(strict=False)
+
+    print("vibeCoding-notify 部署向导")
+    print(f"Python: OK {runtime['version']} ({runtime['executable']})")
+    print(f"配置文件: {config_path}")
+    print(f"Codex 目录: {codex_home}")
+
+    config_data = build_setup_config(repo_root, config_path)
+    write_json_file(config_path, config_data)
+    print(f"\n已写入配置: {config_path}")
+
+    config = load_config(config_path)
+    if not skip_test and prompt_yes_no("是否立即发送一条飞书测试消息", default=True):
+        payload = create_sample_payload("stop", repo_root)
+        payload["last_assistant_message"] = "vibeCoding-notify 测试消息：飞书通知配置已写入。"
+        context = build_context_from_session_message(
+            "stop",
+            payload,
+            config,
+            payload["last_assistant_message"],
+            "final_answer",
+        )
+        final_payload = build_final_payload(context, config)
+        try:
+            response = send_to_feishu(final_payload, resolve_target_webhook(context, config), config)
+            print(f"测试发送完成，飞书返回: {json.dumps(response, ensure_ascii=False)}")
+        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as error:
+            print(f"测试发送失败: {error}")
+            if not prompt_yes_no("仍然继续部署 hook 吗", default=False):
+                return 1
+
+    if no_deploy:
+        print("已跳过 hook 部署。")
+        return 0
+    if prompt_yes_no("是否写入 Codex hooks.json 完成部署", default=True):
+        result = deploy_hooks(config_path, codex_home)
+        print(f"已部署 hooks: {result['hooks_path']}")
+        if result.get("backup_path"):
+            print(f"原 hooks 已备份: {result['backup_path']}")
+        print("下一步：在 Codex 中执行 /hooks，并信任新增 hook。")
+    else:
+        print("已保存配置，但尚未部署 hook。")
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     repo_root = project_root_from_script()
     parser = argparse.ArgumentParser(description="Codex -> 飞书实时过程 Hook")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    setup_parser = subparsers.add_parser("setup", help="交互式部署向导")
+    setup_parser.add_argument("--config", default=str(default_config_path(repo_root)), help="配置文件路径")
+    setup_parser.add_argument("--codex-home", default=str(Path.home() / ".codex"), help="Codex 用户目录")
+    setup_parser.add_argument("--skip-test", action="store_true", help="跳过飞书测试发送")
+    setup_parser.add_argument("--no-deploy", action="store_true", help="只写配置，不写入 hooks.json")
 
     hook_parser = subparsers.add_parser("hook", help="由 Codex hooks 调用")
     hook_parser.add_argument("--event", required=True, help="规范化事件名")
@@ -1320,6 +1550,13 @@ def ensure_payload(event_name: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    if args.command == "setup":
+        return run_setup_wizard(
+            config_path=Path(args.config),
+            codex_home=Path(args.codex_home),
+            skip_test=args.skip_test,
+            no_deploy=args.no_deploy,
+        )
     if args.command == "deploy":
         result = deploy_hooks(
             config_path=Path(args.config).resolve(strict=False),

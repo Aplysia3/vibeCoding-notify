@@ -64,6 +64,72 @@ py -3 --version
 
 ## 快速开始
 
+推荐使用交互式部署向导，它会先检测 Python 3.10+，再引导填写飞书 webhook、签名密钥、关键词、通知范围，并可选择发送测试消息和写入 Codex hooks。
+
+```powershell
+.\scripts\setup.cmd
+```
+
+也可以直接运行 Python 向导：
+
+```powershell
+py -3 .\scripts\feishu_codex_hook.py setup
+```
+
+### 自动部署流程详解
+
+自动部署向导会按下面的顺序执行：
+
+1. 检测 Python 环境。
+
+   `scripts/setup.cmd` 会依次尝试 `py -3`、`python` 和 `python3`，并确认版本不低于 Python 3.10。检测通过后，实际部署写入的 hook 也会使用当前可用的 Python 命令，避免部署后 Codex 找不到解释器。
+
+2. 读取或创建本地配置。
+
+   向导默认使用 `config/feishu.local.json`。如果这个文件已经存在，会在原有值基础上继续引导修改；如果不存在，会从 `config/feishu.example.json` 读取默认字段并生成本地配置。`config/feishu.local.json` 不应提交到 Git，因为里面会保存 webhook、secret 等本机敏感信息。
+
+3. 引导填写飞书机器人信息。
+
+   - `webhook`：主机器人地址，必填，用于授权、完成和异常通知。
+   - `process_webhook`：过程通知机器人地址，可留空；留空时过程通知会复用主机器人。
+   - `codex_alias`：卡片里显示的 Codex 名称，例如 `user_codex`。
+   - `codex_alias_tag_color`：飞书卡片中 Codex 名称标签的颜色。
+   - `secret`：飞书机器人签名密钥；未开启签名校验时留空。
+   - `keyword`：飞书机器人关键词校验；未开启关键词校验时留空。
+   - `allowed_roots`：通知生效范围。选择全局时写入 `[]`，表示所有 Codex 工作目录都会发送通知；选择当前仓库或手动目录时，只处理这些目录下的 Codex 会话。
+   - `send_subagent_events`：是否发送子代理事件，默认关闭以减少噪音。
+
+4. 写入配置文件。
+
+   向导会把最终结果写入 `config/feishu.local.json`，并补齐脚本运行需要的默认字段，例如 `enabled_events`、`tool_whitelist`、`log_path` 和 `state_dir`。
+
+5. 可选发送测试消息。
+
+   如果选择发送测试消息，向导会用刚写好的配置向飞书发送一条 `Stop` 类型的模拟完成通知。测试失败时，向导会显示错误，并询问是否仍然继续写入 Codex hook。
+
+6. 可选写入 Codex hooks。
+
+   如果选择部署，向导会更新用户级 `~/.codex/hooks.json`：先备份现有文件，再移除本项目可识别的旧通知 hook，保留其他无关 hook，最后写入本项目管理的 `PreToolUse`、`PermissionRequest`、`Stop` 和 `UserPromptSubmit`。
+
+7. 在 Codex 中信任 hook。
+
+   部署完成后，进入 Codex 执行 `/hooks`，按提示信任新增 hook。没有完成这一步时，Codex 可能不会执行刚写入的命令。
+
+常用向导参数：
+
+```powershell
+# 跳过飞书测试发送
+.\scripts\setup.cmd --skip-test
+
+# 只生成/更新 config\feishu.local.json，不写入 hooks.json
+.\scripts\setup.cmd --no-deploy
+
+# 使用自定义配置文件或 Codex 用户目录
+.\scripts\setup.cmd --config .\config\feishu.local.json --codex-home "$HOME\.codex"
+```
+
+下面是手动部署流程。
+
 1. 克隆或下载仓库。
 
 ```powershell
@@ -124,7 +190,7 @@ py -3 .\scripts\feishu_codex_hook.py deploy --config .\config\feishu.local.json
 | --- | --- | --- |
 | `webhook` | 示例地址 | 主飞书机器人 webhook，用于授权、完成和异常通知 |
 | `process_webhook` | 示例地址 | 过程通知 webhook；留空时使用 `webhook` |
-| `codex_alias` | `Codex` | 卡片中显示的 Codex 别名，例如 `4080s codex` |
+| `codex_alias` | `Codex` | 卡片中显示的 Codex 别名，例如 `user_codex` |
 | `codex_alias_tag_color` | `orange` | 飞书 `text_tag` 标签颜色 |
 | `secret` | 空字符串 | 飞书机器人签名密钥，未启用签名时留空 |
 | `keyword` | 空字符串 | 飞书机器人关键词校验；配置后会自动注入标题 |

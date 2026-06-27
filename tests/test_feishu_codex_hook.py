@@ -26,7 +26,7 @@ class FeishuCodexHookTests(unittest.TestCase):
         config_data = {
             "webhook": "https://example.invalid/hook",
             "process_webhook": "https://example.invalid/process-hook",
-            "codex_alias": "4080s codex",
+            "codex_alias": "user_codex",
             "codex_alias_tag_color": "orange",
             "secret": "",
             "keyword": "",
@@ -48,6 +48,34 @@ class FeishuCodexHookTests(unittest.TestCase):
         self.assertEqual(MODULE.normalize_event_name("SessionStart"), "session_start")
         self.assertEqual(MODULE.normalize_event_name("PermissionRequest"), "permission_request")
         self.assertEqual(MODULE.normalize_event_name("stop"), "stop")
+
+    def test_inspect_python_runtime_checks_minimum_version(self) -> None:
+        old_runtime = MODULE.inspect_python_runtime((3, 9, 18), "python")
+        current_runtime = MODULE.inspect_python_runtime((3, 10, 0), "python")
+        self.assertFalse(old_runtime["supported"])
+        self.assertTrue(current_runtime["supported"])
+        self.assertEqual(current_runtime["minimum"], "3.10")
+
+    def test_complete_config_data_fills_setup_defaults(self) -> None:
+        data = MODULE.complete_config_data({"webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/token"})
+        self.assertEqual(data["webhook"], "https://open.feishu.cn/open-apis/bot/v2/hook/token")
+        self.assertEqual(data["codex_alias"], "Codex")
+        self.assertEqual(data["codex_alias_tag_color"], "orange")
+        self.assertEqual(data["enabled_events"], MODULE.DEFAULT_ENABLED_EVENTS)
+        self.assertEqual(data["allowed_roots"], [])
+        self.assertEqual(data["tool_whitelist"], MODULE.DEFAULT_TOOL_WHITELIST)
+
+    def test_webhook_helpers_identify_placeholders_and_feishu_urls(self) -> None:
+        self.assertTrue(MODULE.is_placeholder_webhook("https://open.feishu.cn/open-apis/bot/v2/hook/your-token"))
+        self.assertTrue(MODULE.looks_like_feishu_webhook("https://open.feishu.cn/open-apis/bot/v2/hook/abc"))
+        self.assertTrue(MODULE.looks_like_feishu_webhook("https://open.larksuite.com/open-apis/bot/v2/hook/abc"))
+        self.assertFalse(MODULE.looks_like_feishu_webhook("https://example.invalid/hook"))
+
+    def test_build_hook_handler_uses_current_python_executable(self) -> None:
+        with mock.patch.object(MODULE.sys, "executable", r"C:\Python311\python.exe"):
+            handler = MODULE.build_hook_handler(Path("hook.py"), Path("config.json"), "stop")
+        self.assertIn(r"C:\Python311\python.exe", handler["commandWindows"])
+        self.assertIn("managed-by=vibe_feishu_hook", handler["commandWindows"])
 
     def test_sanitize_summary_masks_sensitive_text(self) -> None:
         text = "Authorization: Bearer abcdef"
@@ -73,7 +101,7 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertEqual(context["title"], "Codex 需要授权")
             self.assertEqual(context["template"], "orange")
             self.assertEqual(context["summary"], "请求执行 Bash 命令：git push origin main")
-            self.assertEqual(context["codex_alias"], "4080s codex")
+            self.assertEqual(context["codex_alias"], "user_codex")
             self.assertEqual(context["codex_alias_tag_color"], "orange")
 
     def test_extract_event_context_for_stop(self) -> None:
@@ -104,7 +132,7 @@ class FeishuCodexHookTests(unittest.TestCase):
                 "summary": "已完成训练状态检查。",
                 "body_text": "已完成训练状态检查。\n\n不会发送第二段。",
                 "delivery_mode": "card",
-                "codex_alias": "4080s codex",
+                "codex_alias": "user_codex",
                 "codex_alias_tag_color": "orange",
                 "project": "demo",
                 "cwd": str(root),
@@ -120,7 +148,7 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertEqual(payload["msg_type"], "interactive")
             self.assertEqual(payload["card"]["header"]["title"]["content"], "Codex 任务完成")
             elements = payload["card"]["body"]["elements"]
-            self.assertIn("**Codex：** <text_tag color='orange'>4080s codex</text_tag>", elements[0]["content"])
+            self.assertIn("**Codex：** <text_tag color='orange'>user_codex</text_tag>", elements[0]["content"])
             self.assertIn("**项目：** demo", elements[0]["content"])
             self.assertEqual(elements[1]["tag"], "hr")
             self.assertEqual(elements[2]["content"], "已完成训练状态检查。")
@@ -163,7 +191,7 @@ class FeishuCodexHookTests(unittest.TestCase):
             "summary": "已提交。",
             "body_text": "已提交。\n\n提交信息：新增 Codex 到飞书的实时过程 Hook",
             "delivery_mode": "card",
-            "codex_alias": "4080s codex",
+            "codex_alias": "user_codex",
             "codex_alias_tag_color": "orange",
             "project": "vibeCoding-notify",
             "cwd": "D:\\WorkDic\\Program\\vibeCoding-notify",
@@ -180,7 +208,7 @@ class FeishuCodexHookTests(unittest.TestCase):
         self.assertEqual(payload["msg_type"], "interactive")
         elements = payload["card"]["body"]["elements"]
         self.assertEqual(elements[0]["tag"], "markdown")
-        self.assertIn("**Codex：** <text_tag color='orange'>4080s codex</text_tag>", elements[0]["content"])
+        self.assertIn("**Codex：** <text_tag color='orange'>user_codex</text_tag>", elements[0]["content"])
         self.assertIn("**项目：** vibeCoding-notify", elements[0]["content"])
         self.assertIn("**事件：** Stop", elements[0]["content"])
         self.assertIn("**Session：** abc12345", elements[0]["content"])
