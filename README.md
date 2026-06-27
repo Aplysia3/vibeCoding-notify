@@ -303,4 +303,6 @@ git archive --format=zip --output=releases\vibecoding-notify-v1.1.zip --prefix=v
 
 ## License
 
-当前仓库尚未包含 `LICENSE` 文件。公开发布前建议补充明确许可证。
+本项目使用 [GNU General Public License v3.0](./LICENSE)（`GPL-3.0-only`）。
+
+GPL 允许个人和商业场景使用、复制、修改和分发，但如果你分发本项目或基于本项目修改后的版本，需要按 GPLv3 的要求提供相同许可证下的源码和许可证文本。
