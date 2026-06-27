@@ -64,7 +64,7 @@
 
 重要字段：
 
-- `allowed_roots`：允许发送通知的仓库根路径；部署时会自动写入当前仓库
+- `allowed_roots`：允许发送通知的仓库根路径；空数组表示全局生效，填入路径后只处理这些目录下的 Codex 会话
 - `tool_whitelist`：哪些工具事件可以触发过程消息抓取
 - `state_dir`：去重和静默状态缓存目录
 - `log_path`：本地日志
@@ -85,7 +85,7 @@ py -3 .\scripts\feishu_codex_hook.py deploy --config .\config\feishu.local.json
   - `codex_alert_notify.py`
 - 保留其他无关 hooks
 - 写入当前方案的用户级 hooks
-- 把当前仓库根路径写入本地配置的 `allowed_roots`
+- 不改写本地配置中的 `allowed_roots`；默认空数组为全局模式
 
 部署完成后，在 Codex 里执行：
 

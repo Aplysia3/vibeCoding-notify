@@ -10,9 +10,7 @@
     "permission_request",
     "stop"
   ],
-  "allowed_roots": [
-    "D:\\WorkDic\\Program\\vibeCoding-notify"
-  ],
+  "allowed_roots": [],
   "tool_whitelist": [
     "Bash",
     "apply_patch",

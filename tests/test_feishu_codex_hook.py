@@ -19,8 +19,10 @@ SPEC.loader.exec_module(MODULE)
 
 
 class FeishuCodexHookTests(unittest.TestCase):
-    def create_config(self, root: Path) -> MODULE.HookConfig:
+    def create_config(self, root: Path, allowed_roots: list[str] | None = None) -> MODULE.HookConfig:
         config_path = root / "config.json"
+        if allowed_roots is None:
+            allowed_roots = [str(root)]
         config_data = {
             "webhook": "https://example.invalid/hook",
             "process_webhook": "https://example.invalid/process-hook",
@@ -29,7 +31,7 @@ class FeishuCodexHookTests(unittest.TestCase):
             "secret": "",
             "keyword": "",
             "enabled_events": MODULE.DEFAULT_ENABLED_EVENTS,
-            "allowed_roots": [str(root)],
+            "allowed_roots": allowed_roots,
             "tool_whitelist": MODULE.DEFAULT_TOOL_WHITELIST,
             "request_timeout_seconds": 10,
             "dedupe_window_seconds": 5,
@@ -346,6 +348,27 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertEqual(context["template"], "red")
             self.assertEqual(context["panel_title"], "查看异常详情")
 
+    def test_should_process_event_allows_any_cwd_when_allowed_roots_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root, allowed_roots=[])
+            state = MODULE.HookState(root / "state")
+            try:
+                allowed, reason = MODULE.should_process_event(
+                    "pre_tool_use",
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "cwd": str(root.parent / "other-project"),
+                        "session_id": "global-session",
+                        "tool_name": "Bash",
+                    },
+                    config,
+                    state,
+                )
+            finally:
+                state.close()
+            self.assertTrue(allowed, reason)
+
     def test_deploy_removes_old_notification_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -387,6 +410,16 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertTrue(any("keep_me.py" in handler.get("command", "") for handler in stop_handlers))
             self.assertTrue(any(MODULE.MANAGED_MARKER in handler.get("commandWindows", "") for handler in stop_handlers))
             self.assertTrue(result["backup_path"])
+
+    def test_deploy_preserves_global_allowed_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root, allowed_roots=[])
+            codex_home = root / ".codex"
+            result = MODULE.deploy_hooks(config.config_path, codex_home)
+            saved_config = json.loads(config.config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_config["allowed_roots"], [])
+            self.assertTrue(result["hooks_path"])
 
 
 if __name__ == "__main__":

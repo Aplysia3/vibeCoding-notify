@@ -372,7 +372,7 @@ def write_json_file(path: Path, data: dict[str, Any]) -> None:
 def load_config(path: Path) -> HookConfig:
     raw = load_json_file(path)
     repo_root = project_root_from_script()
-    allowed_root_values = raw.get("allowed_roots") or [str(repo_root)]
+    allowed_root_values = raw.get("allowed_roots") or []
     allowed_roots = [Path(value).resolve(strict=False) for value in allowed_root_values]
     log_path = Path(raw.get("log_path") or "logs/feishu-codex-hook.log")
     if not log_path.is_absolute():
@@ -961,7 +961,7 @@ def should_process_event(event_name: str, payload: dict[str, Any], config: HookC
     if not cwd:
         return False, "missing cwd"
     cwd_path = Path(cwd).resolve(strict=False)
-    if not any(is_path_within(cwd_path, root) for root in config.allowed_roots):
+    if config.allowed_roots and not any(is_path_within(cwd_path, root) for root in config.allowed_roots):
         return False, "cwd not in allowed roots"
     session_id = get_payload_value(payload, "session_id")
     if event_name in {"pre_tool_use"} and state.get_quiet_until(session_id) > time.time():
@@ -1212,16 +1212,8 @@ def merge_hook_groups(existing_hooks: dict[str, Any], managed_groups: dict[str, 
 
 
 def deploy_hooks(config_path: Path, codex_home: Path) -> dict[str, Any]:
-    repo_root = project_root_from_script()
     script_path = Path(__file__).resolve()
     hooks_path = codex_home / "hooks.json"
-    config_data = load_json_file(config_path)
-    allowed_roots = config_data.get("allowed_roots") or []
-    repo_root_text = str(repo_root)
-    if repo_root_text not in allowed_roots:
-        allowed_roots = [repo_root_text, *[value for value in allowed_roots if value != repo_root_text]]
-        config_data["allowed_roots"] = allowed_roots
-        write_json_file(config_path, config_data)
     backup_path = backup_hooks_file(hooks_path)
     hooks_document = load_hooks_document(hooks_path)
     existing_hooks = hooks_document.get("hooks")
