@@ -27,6 +27,7 @@ from typing import Any
 
 MANAGED_MARKER = "managed-by=vibe_feishu_hook"
 DEFAULT_ENABLED_EVENTS = [
+    "user_prompt_submit",
     "pre_tool_use",
     "permission_request",
     "stop",
@@ -411,6 +412,15 @@ def load_setup_defaults(config_path: Path, repo_root: Path) -> dict[str, Any]:
     return complete_config_data(base)
 
 
+def merge_default_items(current: Any, defaults: list[str]) -> list[str]:
+    merged: list[str] = []
+    for item in [*(current or []), *defaults]:
+        value = str(item).strip()
+        if value and value not in merged:
+            merged.append(value)
+    return merged
+
+
 def complete_config_data(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "webhook": str(raw.get("webhook") or "").strip(),
@@ -419,9 +429,9 @@ def complete_config_data(raw: dict[str, Any]) -> dict[str, Any]:
         "codex_alias_tag_color": normalize_text_tag_color(raw.get("codex_alias_tag_color")),
         "secret": str(raw.get("secret") or "").strip(),
         "keyword": str(raw.get("keyword") or "").strip(),
-        "enabled_events": [str(item).strip() for item in (raw.get("enabled_events") or DEFAULT_ENABLED_EVENTS)],
+        "enabled_events": merge_default_items(raw.get("enabled_events"), DEFAULT_ENABLED_EVENTS),
         "allowed_roots": [str(item).strip() for item in (raw.get("allowed_roots") or []) if str(item).strip()],
-        "tool_whitelist": [str(item).strip() for item in (raw.get("tool_whitelist") or DEFAULT_TOOL_WHITELIST)],
+        "tool_whitelist": merge_default_items(raw.get("tool_whitelist"), DEFAULT_TOOL_WHITELIST),
         "request_timeout_seconds": int(raw.get("request_timeout_seconds") or 10),
         "dedupe_window_seconds": int(raw.get("dedupe_window_seconds") or 5),
         "tool_event_min_interval_seconds": int(raw.get("tool_event_min_interval_seconds") or 3),
@@ -766,6 +776,14 @@ def extract_success_flag(payload: dict[str, Any]) -> bool | None:
     return None
 
 
+def extract_user_prompt_text(payload: dict[str, Any]) -> str:
+    for key in ("prompt", "message", "user_prompt", "input", "text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def extract_event_context(event_name: str, payload: dict[str, Any], config: HookConfig) -> dict[str, Any]:
     cwd = get_payload_value(payload, "cwd")
     project = get_project_name(cwd)
@@ -797,6 +815,11 @@ def extract_event_context(event_name: str, payload: dict[str, Any], config: Hook
         template = "orange"
         prompt = get_payload_value(payload, "prompt") or get_payload_value(payload, "message")
         summary = sanitize_summary(prompt, config.max_summary_length) or "Codex 请求执行受限操作"
+    elif event_name == "user_prompt_submit":
+        title = "用户发送消息"
+        template = "violet"
+        prompt = extract_user_prompt_text(payload)
+        summary = sanitize_summary(prompt, config.max_summary_length) or "用户已发送新消息"
     elif event_name == "stop":
         title = "Codex 任务完成"
         template = "green"
@@ -833,6 +856,21 @@ def extract_event_context(event_name: str, payload: dict[str, Any], config: Hook
         "meta_line": " | ".join(meta_parts),
         "timestamp_text": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+
+
+def build_context_from_user_prompt(payload: dict[str, Any], config: HookConfig) -> dict[str, Any]:
+    context = extract_event_context("user_prompt_submit", payload, config)
+    body_text = normalize_summary_source(extract_user_prompt_text(payload)).strip()
+    if contains_sensitive_marker(body_text):
+        body_text = "内容已脱敏"
+    context["summary"] = sanitize_summary(body_text, config.max_summary_length) or context["summary"]
+    context["body_text"] = body_text or context["summary"]
+    context["title"] = "用户发送消息"
+    context["template"] = "violet"
+    context["panel_title"] = "查看完整用户消息"
+    if config.keyword and config.keyword not in context["body_text"] and config.keyword not in context["title"]:
+        context["title"] = f"{config.keyword} {context['title']}"
+    return context
 
 
 def build_context_from_session_message(
@@ -1061,7 +1099,7 @@ def build_final_payload(context: dict[str, Any], config: HookConfig) -> dict[str
 
 
 def resolve_target_webhook(context: dict[str, Any], config: HookConfig) -> str:
-    if context.get("event_name") == "pre_tool_use" and config.process_webhook:
+    if context.get("event_name") in {"pre_tool_use", "user_prompt_submit"} and config.process_webhook:
         return config.process_webhook
     return config.webhook
 
@@ -1123,8 +1161,6 @@ def read_stdin_text() -> str:
 
 
 def should_process_event(event_name: str, payload: dict[str, Any], config: HookConfig, state: HookState) -> tuple[bool, str]:
-    if event_name == "user_prompt_submit":
-        return False, "user prompt event only updates quiet state"
     if event_name not in config.enabled_events:
         return False, "event disabled"
     if payload.get("agent_id") and not config.send_subagent_events:
@@ -1158,21 +1194,23 @@ def run_hook(event_name: str, payload: dict[str, Any], config: HookConfig) -> in
         if event_name == "user_prompt_submit":
             state.set_quiet_until(session_id, now + QUIET_AFTER_USER_SECONDS)
             write_log(config, f"quiet session set: session={session_id}")
-            return 0
         should_process, reason = should_process_event(event_name, payload, config, state)
         if not should_process:
             write_log(config, f"skip event={event_name} reason={reason}")
             return 0
         session_id = get_payload_value(payload, "session_id")
-        session_updates = extract_session_text_update(session_id, state)
 
-        if event_name == "pre_tool_use":
+        if event_name == "user_prompt_submit":
+            context = build_context_from_user_prompt(payload, config)
+        elif event_name == "pre_tool_use":
+            session_updates = extract_session_text_update(session_id, state)
             commentary_message = session_updates.get("commentary")
             if not commentary_message:
                 write_log(config, f"skip event={event_name} reason=no new commentary session={session_id}")
                 return 0
             context = build_context_from_session_message(event_name, payload, config, commentary_message, "commentary")
         elif event_name == "stop":
+            session_updates = extract_session_text_update(session_id, state)
             terminal_state = session_updates
             if not terminal_state.get("final_answer") and not terminal_state.get("error"):
                 terminal_state = wait_for_terminal_session_text(session_id, STOP_FINAL_WAIT_SECONDS)
@@ -1255,6 +1293,14 @@ def create_sample_payload(event_name: str, repo_root: Path) -> dict[str, Any]:
             "tool_name": "Bash",
             "success": True,
         }
+    if event_name == "user_prompt_submit":
+        return {
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": cwd,
+            "session_id": "sample-user-prompt",
+            "model": "gpt-5.4",
+            "prompt": "请帮我检查项目状态，并给出下一步建议。",
+        }
     if event_name == "permission_request":
         return {
             "hook_event_name": "PermissionRequest",
@@ -1303,6 +1349,60 @@ def is_old_notification_handler(handler: dict[str, Any]) -> bool:
             text_values.append(value)
     joined = " ".join(text_values)
     return any(marker in joined for marker in ("cc-notify-hooks", "codex_alert_notify.py", MANAGED_MARKER))
+
+
+def is_managed_hook_handler(handler: dict[str, Any]) -> bool:
+    text_values = []
+    for key in ("command", "commandWindows"):
+        value = handler.get(key)
+        if isinstance(value, str):
+            text_values.append(value)
+    return MANAGED_MARKER in " ".join(text_values)
+
+
+def collect_installed_hooks(codex_home: Path) -> dict[str, Any]:
+    hooks_path = codex_home / "hooks.json"
+    result: dict[str, Any] = {
+        "hooks_path": str(hooks_path),
+        "exists": hooks_path.exists(),
+        "events": [],
+        "handlers": 0,
+    }
+    if not hooks_path.exists():
+        return result
+    hooks_document = load_hooks_document(hooks_path)
+    existing_hooks = hooks_document.get("hooks")
+    if not isinstance(existing_hooks, dict):
+        return result
+    events: list[str] = []
+    handler_count = 0
+    for event_name, groups in existing_hooks.items():
+        if not isinstance(groups, list):
+            continue
+        event_has_managed_handler = False
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                continue
+            for handler in handlers:
+                if isinstance(handler, dict) and is_managed_hook_handler(handler):
+                    handler_count += 1
+                    event_has_managed_handler = True
+        if event_has_managed_handler:
+            events.append(str(event_name))
+    result["events"] = sorted(events)
+    result["handlers"] = handler_count
+    return result
+
+
+def print_installed_hooks(installed: dict[str, Any]) -> None:
+    print(f"已检测到现有 hooks 文件: {installed['hooks_path']}")
+    events = installed.get("events") or []
+    if events:
+        print(f"本项目已安装的 hook: {', '.join(events)}")
+    print(f"托管 hook 数量: {installed.get('handlers', 0)}")
 
 
 def prune_handlers(groups: list[Any]) -> list[Any]:
@@ -1445,6 +1545,32 @@ def undeploy_hooks(codex_home: Path) -> dict[str, Any]:
     return {"hooks_path": str(hooks_path), "removed": removed}
 
 
+def repair_config_file(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        raise SystemExit(f"未找到配置文件: {config_path}\n请先运行 setup 完成首次配置。")
+    original = load_json_file(config_path)
+    repaired = complete_config_data(original)
+    write_json_file(config_path, repaired)
+    return repaired
+
+
+def repair_and_deploy(config_path: Path, codex_home: Path, no_deploy: bool) -> int:
+    repaired = repair_config_file(config_path)
+    print(f"已更新配置: {config_path}")
+    print(f"enabled_events: {', '.join(repaired['enabled_events'])}")
+
+    if no_deploy:
+        print("已跳过 hook 重新部署。")
+        return 0
+
+    result = deploy_hooks(config_path, codex_home)
+    print(f"已重新部署 hooks: {result['hooks_path']}")
+    if result.get("backup_path"):
+        print(f"原 hooks 已备份: {result['backup_path']}")
+    print("下一步：在 Codex 中执行 /hooks，并信任新增或变更的 hook。")
+    return 0
+
+
 def run_setup_wizard(config_path: Path, codex_home: Path, skip_test: bool, no_deploy: bool) -> int:
     runtime = ensure_supported_python()
     repo_root = project_root_from_script()
@@ -1455,6 +1581,28 @@ def run_setup_wizard(config_path: Path, codex_home: Path, skip_test: bool, no_de
     print(f"Python: OK {runtime['version']} ({runtime['executable']})")
     print(f"配置文件: {config_path}")
     print(f"Codex 目录: {codex_home}")
+
+    installed = collect_installed_hooks(codex_home)
+    if installed.get("handlers"):
+        print("\n检测到本项目已经安装过。")
+        print_installed_hooks(installed)
+        print("\n请选择要执行的操作：")
+        print("  1. 补齐配置并添加/更新 hook")
+        print("  2. 修改飞书配置并重新部署 hook")
+        print("  3. 卸载本项目 hook")
+        print("  4. 退出")
+        action = prompt_choice("请选择", {"1", "2", "3", "4"}, "1")
+        if action == "1":
+            return repair_and_deploy(config_path, codex_home, no_deploy)
+        if action == "3":
+            result = undeploy_hooks(codex_home)
+            print(f"已卸载本项目 hook: {result['hooks_path']}")
+            print(f"移除 hook 数量: {result.get('removed', 0)}")
+            return 0
+        if action == "4":
+            print("未做任何修改。")
+            return 0
+        print("\n进入配置修改流程。")
 
     config_data = build_setup_config(repo_root, config_path)
     write_json_file(config_path, config_data)
@@ -1580,7 +1728,9 @@ def main() -> int:
     if args.command == "hook":
         return run_hook(event_name, payload, config)
 
-    if event_name == "stop" and get_payload_value(payload, "last_assistant_message"):
+    if event_name == "user_prompt_submit":
+        context = build_context_from_user_prompt(payload, config)
+    elif event_name == "stop" and get_payload_value(payload, "last_assistant_message"):
         context = build_context_from_session_message(
             event_name,
             payload,

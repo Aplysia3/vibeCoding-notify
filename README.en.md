@@ -29,7 +29,7 @@ After deployment, the script writes these Codex hooks to the user-level `~/.code
 | `PreToolUse` | Reads the latest progress message before a tool call | Yes, to `process_webhook`, or `webhook` when no process webhook is configured |
 | `PermissionRequest` | Notifies when Codex asks for approval | Yes, to `webhook` |
 | `Stop` | Notifies when the current turn finishes | Yes, to `webhook` |
-| `UserPromptSubmit` | Marks that the user returned to the terminal, used for a short quiet window | No |
+| `UserPromptSubmit` | Sends the newly submitted user message and starts a short quiet window | Yes, to `process_webhook` with a light-purple card, or `webhook` when no process webhook is configured |
 
 `PostToolUse` messages such as "tool completed" are intentionally not sent by default because they are noisy and usually do not contain useful process context.
 
@@ -128,6 +128,33 @@ Useful wizard flags:
 .\scripts\setup.cmd --config .\config\feishu.local.json --codex-home "$HOME\.codex"
 ```
 
+### Maintain An Existing Install
+
+If you installed this project before, run the same wizard again to enter maintenance mode. You do not need to remember a separate repair command:
+
+```powershell
+.\scripts\setup.cmd
+```
+
+The wizard checks Python first, then reads the user-level `~/.codex/hooks.json`. If it finds hooks managed by this project, it lists them and asks what to do:
+
+1. Fill config and add/update hooks: useful after an upgrade adds a hook, such as the new `UserPromptSubmit` user-message notification.
+2. Edit Feishu settings and redeploy hooks: useful when changing webhook, secret, keyword, or notification scope.
+3. Uninstall this project's hooks: removes only hooks written by this project and keeps unrelated hooks.
+4. Exit without changes.
+
+After updating or uninstalling, run `/hooks` inside Codex and trust newly added or changed hooks.
+
+Useful maintenance flags:
+
+```powershell
+# Only update config\feishu.local.json; do not write hooks.json
+.\scripts\setup.cmd --no-deploy
+
+# Use a custom config path or Codex user directory
+.\scripts\setup.cmd --config .\config\feishu.local.json --codex-home "$HOME\.codex"
+```
+
 Manual setup steps are still available below.
 
 1. Clone or download the repository.
@@ -154,6 +181,7 @@ Copy-Item .\config\feishu.example.json .\config\feishu.local.json
   "secret": "",
   "keyword": "",
   "enabled_events": [
+    "user_prompt_submit",
     "pre_tool_use",
     "permission_request",
     "stop"
@@ -194,7 +222,7 @@ See [config/feishu.example.json](./config/feishu.example.json) for the full conf
 | `codex_alias_tag_color` | `orange` | Feishu `text_tag` color |
 | `secret` | Empty string | Feishu bot signature secret; leave empty when signature verification is disabled |
 | `keyword` | Empty string | Feishu bot keyword validation; configured keywords are injected into card titles |
-| `enabled_events` | `pre_tool_use`, `permission_request`, `stop` | Events allowed to send notifications |
+| `enabled_events` | `user_prompt_submit`, `pre_tool_use`, `permission_request`, `stop` | Events allowed to send notifications |
 | `allowed_roots` | `[]` | Allowed working directories; an empty array means global mode |
 | `tool_whitelist` | `Bash`, `apply_patch`, `Edit`, `Write`, `web.search*`, `mcp__*` | Tool names allowed to trigger process notifications |
 | `request_timeout_seconds` | `10` | Feishu request timeout |
@@ -204,6 +232,8 @@ See [config/feishu.example.json](./config/feishu.example.json) for the full conf
 | `send_subagent_events` | `false` | Whether to send subagent events |
 | `log_path` | `logs/feishu-codex-hook.log` | Local log path |
 | `state_dir` | `state` | State directory for deduplication, quiet windows, and session cursors |
+
+If you already have an older `config/feishu.local.json`, add `user_prompt_submit` to `enabled_events` manually, or rerun `.\scripts\setup.cmd` to refresh the config.
 
 To restrict notifications to specific projects:
 
@@ -231,6 +261,14 @@ Deployment will:
 - Keep unrelated hooks.
 - Write the managed `PreToolUse`, `PermissionRequest`, `Stop`, and `UserPromptSubmit` hooks.
 - Keep `allowed_roots` unchanged; an empty array remains global mode.
+
+### Maintain Existing Deployment
+
+```powershell
+.\scripts\setup.cmd
+```
+
+After detecting an existing install, the wizard reads the hooks managed by this project from `~/.codex/hooks.json` and offers uninstall, edit settings, or fill config and add/update hooks.
 
 ### Undeploy
 
@@ -333,7 +371,7 @@ If directories are configured, only Codex sessions under those directories will 
 
 ### Fewer Progress Notifications After Submitting a New Prompt
 
-This is expected. After `UserPromptSubmit`, the same session enters a short quiet window to avoid message bursts while you are back in the terminal.
+This is expected. After `UserPromptSubmit`, the message you sent is forwarded to the process bot as a light-purple card, then the same session enters a short quiet window to avoid message bursts while you are back in the terminal.
 
 ### Tool Commands Are Not Shown
 

@@ -65,6 +65,18 @@ class FeishuCodexHookTests(unittest.TestCase):
         self.assertEqual(data["allowed_roots"], [])
         self.assertEqual(data["tool_whitelist"], MODULE.DEFAULT_TOOL_WHITELIST)
 
+    def test_complete_config_data_repairs_old_enabled_events(self) -> None:
+        data = MODULE.complete_config_data(
+            {
+                "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/token",
+                "enabled_events": ["pre_tool_use", "permission_request", "stop"],
+            }
+        )
+        self.assertEqual(
+            data["enabled_events"],
+            ["pre_tool_use", "permission_request", "stop", "user_prompt_submit"],
+        )
+
     def test_webhook_helpers_identify_placeholders_and_feishu_urls(self) -> None:
         self.assertTrue(MODULE.is_placeholder_webhook("https://open.feishu.cn/open-apis/bot/v2/hook/your-token"))
         self.assertTrue(MODULE.looks_like_feishu_webhook("https://open.feishu.cn/open-apis/bot/v2/hook/abc"))
@@ -170,6 +182,41 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertEqual(context["title"], "Codex 过程更新")
             self.assertEqual(context["summary"], "我先检查仓库状态，确认会提交哪些文件。")
 
+    def test_build_context_from_user_prompt_uses_violet_process_card(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root)
+            payload = {
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": str(root),
+                "session_id": "user-prompt-session",
+                "model": "gpt-5.4",
+                "prompt": "请检查 README，并补充部署说明。",
+            }
+            context = MODULE.build_context_from_user_prompt(payload, config)
+            self.assertEqual(context["event_name"], "user_prompt_submit")
+            self.assertEqual(context["event_display_name"], "UserPromptSubmit")
+            self.assertEqual(context["title"], "用户发送消息")
+            self.assertEqual(context["template"], "violet")
+            self.assertEqual(context["summary"], "请检查 README，并补充部署说明。")
+            self.assertEqual(context["body_text"], "请检查 README，并补充部署说明。")
+            self.assertEqual(context["panel_title"], "查看完整用户消息")
+
+    def test_build_context_from_user_prompt_masks_sensitive_body(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root)
+            payload = {
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": str(root),
+                "session_id": "user-prompt-session",
+                "model": "gpt-5.4",
+                "message": "secret=abc123",
+            }
+            context = MODULE.build_context_from_user_prompt(payload, config)
+            self.assertEqual(context["summary"], "内容已脱敏")
+            self.assertEqual(context["body_text"], "内容已脱敏")
+
     def test_build_text_payload_omits_footer_metadata(self) -> None:
         context = {
             "title": "Codex 任务完成",
@@ -237,10 +284,15 @@ class FeishuCodexHookTests(unittest.TestCase):
             root = Path(temp_dir)
             config = self.create_config(root)
             process_context = {"event_name": "pre_tool_use"}
+            user_prompt_context = {"event_name": "user_prompt_submit"}
             stop_context = {"event_name": "stop"}
             error_context = {"event_name": "session_error"}
             self.assertEqual(
                 MODULE.resolve_target_webhook(process_context, config),
+                "https://example.invalid/process-hook",
+            )
+            self.assertEqual(
+                MODULE.resolve_target_webhook(user_prompt_context, config),
                 "https://example.invalid/process-hook",
             )
             self.assertEqual(MODULE.resolve_target_webhook(stop_context, config), "https://example.invalid/hook")
@@ -397,6 +449,27 @@ class FeishuCodexHookTests(unittest.TestCase):
                 state.close()
             self.assertTrue(allowed, reason)
 
+    def test_should_process_event_allows_user_prompt_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self.create_config(root)
+            state = MODULE.HookState(root / "state")
+            try:
+                allowed, reason = MODULE.should_process_event(
+                    "user_prompt_submit",
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "cwd": str(root),
+                        "session_id": "user-prompt-session",
+                        "prompt": "请继续。",
+                    },
+                    config,
+                    state,
+                )
+            finally:
+                state.close()
+            self.assertTrue(allowed, reason)
+
     def test_deploy_removes_old_notification_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -439,6 +512,46 @@ class FeishuCodexHookTests(unittest.TestCase):
             self.assertTrue(any(MODULE.MANAGED_MARKER in handler.get("commandWindows", "") for handler in stop_handlers))
             self.assertTrue(result["backup_path"])
 
+    def test_collect_installed_hooks_reads_managed_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / ".codex"
+            hooks_path = codex_home / "hooks.json"
+            hooks_path.parent.mkdir(parents=True, exist_ok=True)
+            hooks_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "commandWindows": f"py -3 hook.py --managed-by {MODULE.MANAGED_MARKER}",
+                                        }
+                                    ]
+                                }
+                            ],
+                            "PreToolUse": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": "python unrelated.py",
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            installed = MODULE.collect_installed_hooks(codex_home)
+            self.assertEqual(installed["handlers"], 1)
+            self.assertEqual(installed["events"], ["Stop"])
+
     def test_deploy_preserves_global_allowed_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -448,6 +561,27 @@ class FeishuCodexHookTests(unittest.TestCase):
             saved_config = json.loads(config.config_path.read_text(encoding="utf-8"))
             self.assertEqual(saved_config["allowed_roots"], [])
             self.assertTrue(result["hooks_path"])
+
+    def test_repair_and_deploy_updates_old_local_config_without_deploy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "feishu.local.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "webhook": "https://example.invalid/hook",
+                        "enabled_events": ["pre_tool_use", "permission_request", "stop"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch("sys.stdout", io.StringIO()):
+                result = MODULE.repair_and_deploy(config_path, root / ".codex", no_deploy=True)
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(result, 0)
+            self.assertIn("user_prompt_submit", saved_config["enabled_events"])
+            self.assertEqual(saved_config["webhook"], "https://example.invalid/hook")
 
 
 if __name__ == "__main__":

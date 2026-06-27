@@ -6,6 +6,7 @@
   "secret": "",
   "keyword": "",
   "enabled_events": [
+    "user_prompt_submit",
     "pre_tool_use",
     "permission_request",
     "stop"
